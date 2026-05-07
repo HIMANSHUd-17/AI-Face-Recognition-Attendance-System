@@ -1,4 +1,20 @@
 import os
+import sys
+
+# Workaround for pkg_resources issue with face_recognition_models
+try:
+    import pkg_resources
+except ImportError:
+    # Mock pkg_resources if it's missing
+    import types
+    pkg_resources = types.ModuleType('pkg_resources')
+    def mock_resource_filename(pkg, resource):
+        import face_recognition_models
+        base_path = os.path.dirname(face_recognition_models.__file__)
+        return os.path.join(base_path, resource)
+    pkg_resources.resource_filename = mock_resource_filename
+    sys.modules['pkg_resources'] = pkg_resources
+
 import cv2
 try:
     import face_recognition
@@ -49,15 +65,26 @@ else:
 if len(known_encodings) == 0:
     print("No known faces loaded. Add images to the 'known_faces' folder and restart.")
 
+# Prepare a fallback OpenCV face detector for when face_recognition isn't available
+_face_cascade = None
+try:
+    _face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+except Exception:
+    _face_cascade = None
+
+def sanitize_label(label: str) -> str:
+    return "_".join(label.strip().split())
+
 # Function to add a new face from the camera
 def add_face_from_camera(cam, name, num_photos=3):
     """Capture num_photos images from the provided camera, save to KNOWN_FACES_DIR as <name>_i.jpg,
     and append their encodings to known_encodings/known_names so recognition updates immediately.
+    If face_recognition is not installed, this will still save images using an OpenCV fallback detector.
     """
     print(f"Starting capture for '{name}' — aiming for {num_photos} photos. Look at the camera...")
     captured = 0
     attempts = 0
-    max_attempts = num_photos * 30
+    max_attempts = num_photos * 60
 
     while captured < num_photos and attempts < max_attempts:
         attempts += 1
@@ -70,39 +97,54 @@ def add_face_from_camera(cam, name, num_photos=3):
         status_text = f"Capturing {name}: {captured + 1}/{num_photos}"
         cv2.putText(display, status_text, (10, 30), FONT, 0.9, (0, 255, 255), 2, cv2.LINE_AA)
         cv2.imshow('Face Attendance', display)
-        # small sleep so user can adjust
-        cv2.waitKey(200)
+        cv2.waitKey(100)
 
-        # Use a smaller frame for faster face detection
+        # Use a smaller frame for detection
         small = cv2.resize(frame, (0, 0), fx=0.5, fy=0.5)
         rgb_small = cv2.cvtColor(small, cv2.COLOR_BGR2RGB)
-        encs = face_recognition.face_encodings(rgb_small)
 
-        if len(encs) > 0:
-            # Save the full-size image
+        face_detected = False
+        enc = None
+
+        if FACE_RECO_AVAILABLE:
+            encs = face_recognition.face_encodings(rgb_small)
+            if len(encs) > 0:
+                face_detected = True
+                enc = encs[0]
+        else:
+            # Fallback: use OpenCV Haar Cascade to check for a face
+            if _face_cascade is not None:
+                gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+                faces = _face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
+                if len(faces) > 0:
+                    face_detected = True
+
+        if face_detected:
+            # Save full-size image
             filename = os.path.join(KNOWN_FACES_DIR, f"{name}_{captured + 1}.jpg")
             cv2.imwrite(filename, frame)
-            # Use the encoding we found on the small frame (compatible)
-            known_encodings.append(encs[0])
-            known_names.append(name)
-            print(f"  Saved {filename}")
+            if FACE_RECO_AVAILABLE and enc is not None:
+                known_encodings.append(enc)
+                known_names.append(name)
+                print(f"  Saved and encoded {filename}")
+            else:
+                # Encoding unavailable now; we'll still save the image for later encoding
+                known_names.append(name)
+                print(f"  Saved {filename} (encoding skipped; install face_recognition to enable encoding)")
             captured += 1
         else:
-            # no face detected, continue trying until max_attempts
-            if attempts % 5 == 0:
-                print("  No face detected yet, please move into view...")
+            if attempts % 10 == 0:
+                print("  No face detected yet, please move into view or improve lighting...")
 
     if captured == 0:
         print("No faces captured. Try again with better lighting or move closer to camera.")
     else:
         print(f"Captured {captured} photo(s) for '{name}'.")
 
-def sanitize_label(label: str) -> str:
-    return "_".join(label.strip().split())
-
 def import_images(paths, label):
     """Copy images from absolute paths into KNOWN_FACES_DIR as <label>_N.ext,
     extract encodings and add them to known_encodings/known_names.
+    If face_recognition isn't available the images are copied and saved but not encoded.
     """
     label = sanitize_label(label)
     # determine starting index by counting existing files with this label
@@ -138,16 +180,21 @@ def import_images(paths, label):
         try:
             shutil.copy2(p, dest_path)
             print(f"Copied {p} -> {dest_path}")
-            # load and encode
-            image = face_recognition.load_image_file(dest_path)
-            encs = face_recognition.face_encodings(image)
-            if len(encs) == 0:
-                print(f"  No face found in {dest_name}; removing file.")
-                os.remove(dest_path)
+            if FACE_RECO_AVAILABLE:
+                image = face_recognition.load_image_file(dest_path)
+                encs = face_recognition.face_encodings(image)
+                if len(encs) == 0:
+                    print(f"  No face found in {dest_name}; removing file.")
+                    os.remove(dest_path)
+                else:
+                    known_encodings.append(encs[0])
+                    known_names.append(label)
+                    print(f"  Imported and encoded {dest_name} as {label}")
+                    added += 1
             else:
-                known_encodings.append(encs[0])
+                # Keep the copied image; encoding can be done later after installing face_recognition
                 known_names.append(label)
-                print(f"  Imported and encoded {dest_name} as {label}")
+                print(f"  Copied {dest_name} (encoding skipped; install face_recognition to enable encoding)")
                 added += 1
         except Exception as e:
             print(f"Failed to copy/import {p}: {e}")
