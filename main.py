@@ -204,15 +204,59 @@ def import_images(paths, label):
     else:
         print(f"Imported {added} image(s) for label '{label}'.")
 
-# Start webcam
-video = cv2.VideoCapture(0)
-if not video.isOpened():
+def open_webcam(camera_index=0):
+    """Open the camera using a backend that is more reliable on Windows."""
+    backend_candidates = []
+    if os.name == "nt":
+        backend_candidates.extend([
+            ("DSHOW", cv2.CAP_DSHOW),
+            ("MSMF", cv2.CAP_MSMF),
+        ])
+    backend_candidates.append(("ANY", cv2.CAP_ANY))
+
+    for backend_name, backend in backend_candidates:
+        print(f"[DEBUG] Trying webcam backend: {backend_name}")
+        capture = cv2.VideoCapture(camera_index, backend)
+        if not capture.isOpened():
+            capture.release()
+            continue
+
+        capture.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+        capture.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+        capture.set(cv2.CAP_PROP_FPS, 30)
+        capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        try:
+            capture.set(cv2.CAP_PROP_AUTOFOCUS, 1)
+            capture.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)
+        except Exception:
+            pass
+
+        print(f"[DEBUG] VideoCapture created: {capture}")
+        print(f"[DEBUG] Camera isOpened: {capture.isOpened()}")
+        return capture
+
     raise RuntimeError("Could not open webcam")
 
+
+# Start webcam
+print("\n[DEBUG] Attempting to open webcam...")
+video = open_webcam(0)
+
+# Clear frame buffer by reading a few frames
+print("[DEBUG] Clearing camera buffer...")
+for _ in range(5):
+    video.read()
+
+print("[DEBUG] Webcam opened successfully!")
+
+frame_count = 0
 while True:
+    frame_count += 1
     ret, frame = video.read()
     if not ret:
-        break
+        print(f"[DEBUG] Failed to read frame at frame #{frame_count}")
+        time.sleep(0.5)  # Wait a bit and retry
+        continue
 
     # Resize frame for faster processing and convert to RGB
     small_frame = cv2.resize(frame, (0, 0), fx=0.5, fy=0.5)
@@ -220,8 +264,11 @@ while True:
 
     # Detect faces and encodings in the current frame
     if FACE_RECO_AVAILABLE:
-        face_locations = face_recognition.face_locations(rgb_small, model=MODEL)
+        # Use CNN for better accuracy (slower but more reliable)
+        face_locations = face_recognition.face_locations(rgb_small, model="cnn")
         face_encodings = face_recognition.face_encodings(rgb_small, face_locations)
+        if frame_count % 30 == 0:  # Debug every 30 frames
+            print(f"[DEBUG Frame {frame_count}] Detected {len(face_locations)} faces")
     else:
         face_locations = []
         face_encodings = []
